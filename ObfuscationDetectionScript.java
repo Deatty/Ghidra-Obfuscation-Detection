@@ -9,13 +9,17 @@ import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Set;
+import java.util.List;
 
 import ghidra.app.script.GhidraScript;
+import ghidra.graph.GDirectedGraph;
+import ghidra.graph.GEdge;
+import ghidra.graph.GraphAlgorithms;
+import ghidra.graph.GraphFactory;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.block.BasicBlockModel;
@@ -23,6 +27,8 @@ import ghidra.program.model.block.CodeBlock;
 import ghidra.program.model.block.CodeBlockIterator;
 import ghidra.program.model.block.CodeBlockReference;
 import ghidra.program.model.block.CodeBlockReferenceIterator;
+import ghidra.program.model.block.graph.CodeBlockEdge;
+import ghidra.program.model.block.graph.CodeBlockVertex;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.InstructionIterator;
@@ -31,10 +37,6 @@ import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.symbol.FlowType;
 import ghidra.program.util.CyclomaticComplexity;
 import ghidra.util.exception.CancelledException;
-import ghidra.util.graph.DirectedGraph;
-import ghidra.util.graph.Dominator;
-import ghidra.util.graph.Edge;
-import ghidra.util.graph.Vertex;
 import ghidra.util.task.TaskMonitor;
 
 
@@ -57,12 +59,29 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		
 		try {
 			if((currentFunction == null)) {
+				File outputFolder;
+				List<String> choices = new ArrayList<>();
+			
+				choices.add("only print");
+				choices.add("only export");
+				choices.add("print and export");
+				String choice = askChoice("Choose", "What do you want this script to do?", choices, "only print");
+
 				analyzeAllFunctions();
-				dataSet.sortAndPrint();
-				Boolean exportData = askYesNo("Choose", "Do you want to export results in csv format?");
-				if(exportData) {
-					File outputFolder = askDirectory("Select a folder to save results", "Choose");
+
+				switch(choice) {
+				case("only print"):
+					dataSet.sortAndPrint();
+					break;
+				case("only export"):
+					outputFolder = askDirectory("Select a folder to save results", "Choose");
 					exportToCsvFile(outputFolder);
+					break;
+				case("print and export"):
+					dataSet.sortAndPrint();
+					outputFolder = askDirectory("Select a folder to save results", "Choose");
+					exportToCsvFile(outputFolder);
+					break;
 				}
 				return;
 			}
@@ -92,7 +111,6 @@ public class ObfuscationDetectionScript extends GhidraScript {
 	}
 	
 	private void analyzeAllFunctions() throws CancelledException {
-		
 		FunctionIterator functionIterator =  currentProgram.getFunctionManager().getFunctionsNoStubs(true);
 
 		while(functionIterator.hasNext()) {
@@ -104,7 +122,7 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			dataSet.getData().add(functionData);
 		}
 	}
-	
+
 	private void exportToCsvFile(File outputFolder) {
 		FileWriter fileWriter;
 		File outputFile = new File(outputFolder.getAbsolutePath()
@@ -252,7 +270,11 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		}
 		
 		private void printTop10(int dataIndex) {
-			for(int i = 0; i < 10; i++) {
+			int times = 10;
+			if(data.size() < 10) {
+				times = data.size();
+			}
+			for(int i = 0; i < times; i++) {
 				data.get(i).printData(dataIndex);
 			}
 		}
@@ -304,30 +326,30 @@ public class ObfuscationDetectionScript extends GhidraScript {
 
 		public double calcFlatteningScore(Function function)
 				throws CancelledException {
-			ControlFlowGraph controlFlowGraph =  new ControlFlowGraph(function, monitor);
-			Dominator dominator = new Dominator(controlFlowGraph);
-			DirectedGraph dominatorTree = dominator.setDominance();
-			Vertex[] nodes = controlFlowGraph.getVertexArray();
+			GDirectedGraph<CodeBlockVertex, CodeBlockEdge> controlFlowGraph
+					= ControlFlowGraph.createControlFlowGraph(function, monitor);
+			GDirectedGraph<CodeBlockVertex, GEdge<CodeBlockVertex>> dominanceTree
+					= GraphAlgorithms.findDominanceTree(controlFlowGraph, monitor);
+			Collection<CodeBlockVertex> nodes = controlFlowGraph.getVertices();
 			Boolean hasBackEdge;
 			Double score = 0.0;
 			
-			for(int i = 0; i< nodes.length; i++) {
+			for(CodeBlockVertex node: nodes) {
 				if(monitor.isCancelled()) {
 					break;
 				}
-				// getDescendants returns nodes[i] as descendant of itself
-				Set<Vertex> dominatedBlocks = dominatorTree.getDescendants(nodes[i]);
-				Iterator<Vertex> blocksIterator = dominatedBlocks.iterator();
-				while(blocksIterator.hasNext()) {
+				Collection<CodeBlockVertex> collection = new ArrayList<CodeBlockVertex>();
+				collection.add(node);
+				Collection<CodeBlockVertex> dominatedNodes = GraphAlgorithms.getDescendants(dominanceTree, collection);
+				for(CodeBlockVertex dominatedNode: dominatedNodes) {
 					if(monitor.isCancelled()) {
 						break;
 					}
-					Vertex dominatedBlock = blocksIterator.next();
-					hasBackEdge = controlFlowGraph.areRelatedAs(dominatedBlock, nodes[i]);
+					hasBackEdge = controlFlowGraph.containsEdge(dominatedNode, node);
 					if(!hasBackEdge) {
 						continue;
 					}
-					score = Math.max(score, (double)dominatedBlocks.size() / nodes.length);
+					score = Math.max(score, (double)dominatedNodes.size() / nodes.size());
 				}
 			}
 			return score;
@@ -364,58 +386,44 @@ public class ObfuscationDetectionScript extends GhidraScript {
 	}
 }
 
-class ControlFlowGraph extends DirectedGraph{
-	private Function function;
-	private TaskMonitor monitor;
-
-	// makes sure to not insert multiple times the same block in graph
-	// when that block is assigned to a different object Vertex.
-	public ControlFlowGraph(Function function, TaskMonitor monitor) throws CancelledException {
-		this.function = function;
-		this.monitor = monitor;
-		createControlFlowGraph();
+final class ControlFlowGraph {
+	
+	private ControlFlowGraph() {
+		// can't create this;
 	}
 	
-	private Vertex properVertex(CodeBlock codeBlock) {
-		Vertex[] vertices = getVerticesHavingReferent(codeBlock);
-		if(vertices.length == 0) {
-			return new Vertex(codeBlock);
-		}
-		return vertices[0];
-	}
-
-	private void createControlFlowGraph()
+	public static GDirectedGraph<CodeBlockVertex, CodeBlockEdge> createControlFlowGraph(Function function, TaskMonitor monitor)
 			throws CancelledException {
+		GDirectedGraph<CodeBlockVertex, CodeBlockEdge> graph = GraphFactory.createDirectedGraph();
 		BasicBlockModel basicBlockModel = new BasicBlockModel(function.getProgram());
 		CodeBlockIterator codeBlockIterator
 				= basicBlockModel.getCodeBlocksContaining(function.getBody(), monitor);
-
+		
 		while (codeBlockIterator.hasNext()) {
 			if (monitor.isCancelled()) {
 				break;
 			}
-
 			CodeBlock codeBlock = codeBlockIterator.next();
-			Vertex vertexFrom = properVertex(codeBlock);
-
-			add(vertexFrom);
- 
-			CodeBlockReferenceIterator destinations = codeBlock.getDestinations(monitor);
+			CodeBlockVertex startVertex = new CodeBlockVertex(codeBlock);
+			graph.addVertex(startVertex);
+			
+			CodeBlockReferenceIterator destinations = startVertex.getCodeBlock().getDestinations(monitor);
+				
 			while (destinations.hasNext()) {
 				if (monitor.isCancelled()) {
 					break;
 				}
-
 				CodeBlockReference reference = destinations.next();
 				FlowType flowType = reference.getFlowType();
+					
 				if (flowType.isIndirect() || flowType.isCall()) {
 					continue;
 				}
-
-				Vertex vertexTo = properVertex(reference.getDestinationBlock());
-				Edge edge = new Edge(vertexFrom, vertexTo);
-				add(edge);
+				CodeBlockVertex destVertex = new CodeBlockVertex(reference.getDestinationBlock());
+				graph.addEdge(new CodeBlockEdge(startVertex, destVertex));
 			}
 		}
+		return graph;
 	}
+
 }
