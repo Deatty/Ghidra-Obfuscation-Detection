@@ -14,6 +14,11 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+//import java.util.concurrent.Callable;
+//import java.util.concurrent.ExecutionException;
+//import java.util.concurrent.Future;
+//import java.util.stream.Collectors;
+//import java.util.stream.StreamSupport;
 
 import ghidra.app.script.GhidraScript;
 import ghidra.graph.GDirectedGraph;
@@ -37,13 +42,11 @@ import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.symbol.FlowType;
 import ghidra.program.util.CyclomaticComplexity;
 import ghidra.util.exception.CancelledException;
-import ghidra.util.task.TaskMonitor;
 
 
 public class ObfuscationDetectionScript extends GhidraScript {
 	public static CyclomaticComplexity cyclomaticComplexity = new CyclomaticComplexity();
 	public static DataSet dataSet;
-	public static BasicBlockModel basicBlockModel;
 	public static Heuristics heuristics;
 
 	@Override
@@ -52,7 +55,7 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			printerr("no current program");
 			return;
 		}
-		basicBlockModel = new BasicBlockModel(currentProgram);
+		
 		dataSet = new DataSet();
 		heuristics = new Heuristics();
 		Function currentFunction = getFunctionContaining(currentAddress);
@@ -61,14 +64,12 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			if((currentFunction == null)) {
 				File outputFolder;
 				List<String> choices = new ArrayList<>();
-			
+				
+				analyzeAllFunctions();
 				choices.add("only print");
 				choices.add("only export");
 				choices.add("print and export");
 				String choice = askChoice("Choose", "What do you want this script to do?", choices, "only print");
-
-				analyzeAllFunctions();
-
 				switch(choice) {
 				case("only print"):
 					dataSet.sortAndPrint();
@@ -110,18 +111,35 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		return functionData;
 	}
 	
+	//serial implementation
 	private void analyzeAllFunctions() throws CancelledException {
 		FunctionIterator functionIterator =  currentProgram.getFunctionManager().getFunctionsNoStubs(true);
-
+		Function function;
 		while(functionIterator.hasNext()) {
 			if(monitor.isCancelled()) {
 				break;
 			}
-			Function function = functionIterator.next();
+			function = functionIterator.next();
 			FunctionData functionData = analyzeFunction(function);
-			dataSet.getData().add(functionData);
+			dataSet.add(functionData);
 		}
 	}
+	
+	//parallel implementation. Currently seeing mixed gains.
+
+//	private void analyzeAllParallel() {
+//		FunctionIterator functionIterator =  currentProgram.getFunctionManager().getFunctionsNoStubs(true);
+//		StreamSupport.stream(functionIterator.spliterator(), true)
+//				.map(f -> {
+//					try {
+//						return analyzeFunction(f);
+//					} catch (CancelledException e) {
+//						e.printStackTrace();
+//					}
+//					return null;
+//				})
+//				.forEach(e->dataSet.add(e));
+//	}
 
 	private void exportToCsvFile(File outputFolder) {
 		FileWriter fileWriter;
@@ -129,11 +147,11 @@ public class ObfuscationDetectionScript extends GhidraScript {
 				+ File.separator + currentProgram.getName() + "-ObfuscationDetection-Results.csv");
 		try {
 			fileWriter = new FileWriter(outputFile);
-			String headers = String.join(", ", dataSet.getData().get(0).getFieldNames());
+			String headers = String.join(", ", dataSet.get(0).getFieldNames());
 			fileWriter.write(headers + '\n');
 			
 			dataSet.sortByEntryPoint();
-			for (FunctionData i : dataSet.getData()) {
+			for (FunctionData i : dataSet) {
 				String line = String.join(", ", i.getData());
 				fileWriter.write(line + '\n');
 			}
@@ -199,9 +217,9 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		public void printData(int index) {
 			String[] strings = {"Average Instructions: %d", "Complexity Score: %d", "Flattening Score: %f",
 					"Entropy: %f"};
-			Object[] objects = {averageInstructionsPerBlock ,cyclomaticComplexityScore, flatteningScore, entropy};
+			Object[] values = {averageInstructionsPerBlock ,cyclomaticComplexityScore, flatteningScore, entropy};
 			 
-			printf("Function: %s  Address: 0x%s  " + strings[index] + "\n", name, entryPoint, objects[index]);
+			printf("Function: %s  Address: 0x%s  " + strings[index] + "\n", name, entryPoint, values[index]);
 		}
 		
 		public void printData() {
@@ -211,31 +229,27 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		}
 	}
 	
-	private class DataSet {
-		private ArrayList<FunctionData> data = new ArrayList<FunctionData>();
-
-		public ArrayList<FunctionData> getData() {
-			return data;
-		}
-
+	private final class DataSet extends ArrayList<FunctionData> {
+		private final int numOfFeatures = 5;
+		
 		private void sortByAverageInstructions() {
-			data.sort(Comparator.comparingInt(FunctionData::getAverageInstructionsPerBlock).reversed());
+			sort(Comparator.comparingInt(FunctionData::getAverageInstructionsPerBlock).reversed());
 		}
 		
 		private void sortByCyclomaticComplexity() {
-			data.sort(Comparator.comparingInt(FunctionData::getCyclomaticComplexityScore).reversed());
+			sort(Comparator.comparingInt(FunctionData::getCyclomaticComplexityScore).reversed());
 		}
 		
 		private void sortByFlatteningScore() {
-			data.sort(Comparator.comparingDouble(FunctionData::getFlatteningScore).reversed());
+			sort(Comparator.comparingDouble(FunctionData::getFlatteningScore).reversed());
 		}
 		
 		private void sortByEntropy() {
-			data.sort(Comparator.comparingDouble(FunctionData::getEntropy).reversed());
+			sort(Comparator.comparingDouble(FunctionData::getEntropy).reversed());
 		}
 		
 		private void sortByEntryPoint() {
-			data.sort(Comparator.comparing(FunctionData::getEntryPoint));
+			sort(Comparator.comparing(FunctionData::getEntryPoint));
 		}
 		
 		private void sortBy(int sort) {
@@ -259,31 +273,34 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		}
 		
 		private void sortAndPrint() {
-			String line = String.join("", Collections.nCopies(150, "-")) + "\n";
+			String line = String.join("", Collections.nCopies(100, "-")) + "\n";
 			print(line);
-			for(int i = 0; i < 4; i++) {
+
+			for(int i = 0; i < numOfFeatures - 1; i++) {
 				sortBy(i);
 				printTop10(i);
 				print(line);
 			}
-			
 		}
 		
 		private void printTop10(int dataIndex) {
 			int times = 10;
-			if(data.size() < 10) {
-				times = data.size();
+
+			if(size() < 10) {
+				times = size();
 			}
+
 			for(int i = 0; i < times; i++) {
-				data.get(i).printData(dataIndex);
+				get(i).printData(dataIndex);
 			}
 		}
 	}
 
-	public class Heuristics {
+	private final class Heuristics {
 		
-		public int countFunctionBlocks(Function function)
+		private int countFunctionBlocks(Function function)
 				throws CancelledException{
+			BasicBlockModel basicBlockModel = new BasicBlockModel(currentProgram);
 			CodeBlockIterator codeBlockIterator = basicBlockModel.getCodeBlocksContaining(function.getBody(), monitor);
 			int numOfBlocks = 0;
 			
@@ -297,7 +314,7 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			return numOfBlocks;
 		}
 		
-		public int countFunctionInstructions(Function function) {
+		private int countFunctionInstructions(Function function) {
 			AddressSetView addressSetView = function.getBody();
 			Listing listing = currentProgram.getListing();
 			InstructionIterator instructionIterator = listing.getInstructions(addressSetView, true);
@@ -313,7 +330,7 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			return numOfInstructions;
 		}
 		
-		public int calcAverageInstructionsPerBlock(Function function) 
+		private int calcAverageInstructionsPerBlock(Function function) 
 				throws CancelledException {
 		    int numOfBlocks = countFunctionBlocks(function);
 		    int numOfInstructions = countFunctionInstructions(function);
@@ -324,10 +341,10 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		    return 0;
 		}
 
-		public double calcFlatteningScore(Function function)
+		private double calcFlatteningScore(Function function)
 				throws CancelledException {
 			GDirectedGraph<CodeBlockVertex, CodeBlockEdge> controlFlowGraph
-					= ControlFlowGraph.createControlFlowGraph(function, monitor);
+					= createControlFlowGraph(function);
 			GDirectedGraph<CodeBlockVertex, GEdge<CodeBlockVertex>> dominanceTree
 					= GraphAlgorithms.findDominanceTree(controlFlowGraph, monitor);
 			Collection<CodeBlockVertex> nodes = controlFlowGraph.getVertices();
@@ -338,9 +355,8 @@ public class ObfuscationDetectionScript extends GhidraScript {
 				if(monitor.isCancelled()) {
 					break;
 				}
-				Collection<CodeBlockVertex> collection = new ArrayList<CodeBlockVertex>();
-				collection.add(node);
-				Collection<CodeBlockVertex> dominatedNodes = GraphAlgorithms.getDescendants(dominanceTree, collection);
+				Collection<CodeBlockVertex> dominatedNodes = GraphAlgorithms.getDescendants(dominanceTree, Collections.singletonList(node));
+				
 				for(CodeBlockVertex dominatedNode: dominatedNodes) {
 					if(monitor.isCancelled()) {
 						break;
@@ -354,11 +370,46 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			}
 			return score;
 		}
+		
+		private GDirectedGraph<CodeBlockVertex, CodeBlockEdge> createControlFlowGraph(Function function)
+				throws CancelledException {
+			GDirectedGraph<CodeBlockVertex, CodeBlockEdge> graph = GraphFactory.createDirectedGraph();
+			BasicBlockModel basicBlockModel = new BasicBlockModel(function.getProgram());
+			CodeBlockIterator codeBlockIterator
+					= basicBlockModel.getCodeBlocksContaining(function.getBody(), monitor);
+			
+			while (codeBlockIterator.hasNext()) {
+				if (monitor.isCancelled()) {
+					break;
+				}
+				CodeBlock codeBlock = codeBlockIterator.next();
+				CodeBlockVertex startVertex = new CodeBlockVertex(codeBlock);
+				graph.addVertex(startVertex);
+				
+				CodeBlockReferenceIterator destinations = startVertex.getCodeBlock().getDestinations(monitor);
+					
+				while (destinations.hasNext()) {
+					if (monitor.isCancelled()) {
+						break;
+					}
+					CodeBlockReference reference = destinations.next();
+					FlowType flowType = reference.getFlowType();
+						
+					if (flowType.isIndirect() || flowType.isCall()) {
+						continue;
+					}
+					CodeBlockVertex destVertex = new CodeBlockVertex(reference.getDestinationBlock());
+					graph.addEdge(new CodeBlockEdge(startVertex, destVertex));
+				}
+			}
+			return graph;
+		}
 
-		public double calcEntropy(Function function) {
+		private double calcEntropy(Function function) {
 			int numOfBytes = (int)function.getBody().getNumAddresses();
 			double entropy = 0.0;
 			try {
+				// count byte occurrences and save them in a hashmap
 				byte[] bytes = getBytes(function.getEntryPoint(), numOfBytes);
 			    HashMap<Byte, Integer> byteCounter = new HashMap<>();
 			    for(byte i: bytes) {
@@ -371,6 +422,7 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			    		byteCounter.put(i, 1);
 			    	}
 			    }
+			    // calculate entropy
 			    for(Integer i: byteCounter.values()) {
 					if(monitor.isCancelled()) {
 						break;
@@ -384,46 +436,4 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			return entropy;
 		}
 	}
-}
-
-final class ControlFlowGraph {
-	
-	private ControlFlowGraph() {
-		// can't create this;
-	}
-	
-	public static GDirectedGraph<CodeBlockVertex, CodeBlockEdge> createControlFlowGraph(Function function, TaskMonitor monitor)
-			throws CancelledException {
-		GDirectedGraph<CodeBlockVertex, CodeBlockEdge> graph = GraphFactory.createDirectedGraph();
-		BasicBlockModel basicBlockModel = new BasicBlockModel(function.getProgram());
-		CodeBlockIterator codeBlockIterator
-				= basicBlockModel.getCodeBlocksContaining(function.getBody(), monitor);
-		
-		while (codeBlockIterator.hasNext()) {
-			if (monitor.isCancelled()) {
-				break;
-			}
-			CodeBlock codeBlock = codeBlockIterator.next();
-			CodeBlockVertex startVertex = new CodeBlockVertex(codeBlock);
-			graph.addVertex(startVertex);
-			
-			CodeBlockReferenceIterator destinations = startVertex.getCodeBlock().getDestinations(monitor);
-				
-			while (destinations.hasNext()) {
-				if (monitor.isCancelled()) {
-					break;
-				}
-				CodeBlockReference reference = destinations.next();
-				FlowType flowType = reference.getFlowType();
-					
-				if (flowType.isIndirect() || flowType.isCall()) {
-					continue;
-				}
-				CodeBlockVertex destVertex = new CodeBlockVertex(reference.getDestinationBlock());
-				graph.addEdge(new CodeBlockEdge(startVertex, destVertex));
-			}
-		}
-		return graph;
-	}
-
 }
