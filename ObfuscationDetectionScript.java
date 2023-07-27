@@ -8,16 +8,12 @@
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Dictionary;
 import java.util.HashMap;
-import java.util.Hashtable;
 import java.util.List;
 import java.util.stream.StreamSupport;
 
@@ -69,9 +65,6 @@ public class ObfuscationDetectionScript extends GhidraScript {
 				
 				analyzeAllFunctions();
 		
-//				choices.add("only print");
-//				choices.add("only export");
-//				choices.add("print and export");
 				String choice = askChoice("Choose", "What do you want this script to do?", choices, "only print");
 				switch(choice) {
 				case("only print"):
@@ -129,7 +122,6 @@ public class ObfuscationDetectionScript extends GhidraScript {
 	}
 	
 	//parallel implementation. Can't see any gains
-
 	private void analyzeAllParallel() {
 		FunctionIterator functionIterator =  currentProgram.getFunctionManager().getFunctionsNoStubs(true);
 		StreamSupport.stream(functionIterator.spliterator(), true)
