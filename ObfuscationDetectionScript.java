@@ -8,17 +8,18 @@
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Dictionary;
 import java.util.HashMap;
+import java.util.Hashtable;
 import java.util.List;
-//import java.util.concurrent.Callable;
-//import java.util.concurrent.ExecutionException;
-//import java.util.concurrent.Future;
-//import java.util.stream.Collectors;
-//import java.util.stream.StreamSupport;
+import java.util.stream.StreamSupport;
 
 import ghidra.app.script.GhidraScript;
 import ghidra.graph.GDirectedGraph;
@@ -41,6 +42,7 @@ import ghidra.program.model.listing.Listing;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.symbol.FlowType;
 import ghidra.program.util.CyclomaticComplexity;
+import ghidra.util.exception.AssertException;
 import ghidra.util.exception.CancelledException;
 
 
@@ -63,12 +65,13 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		try {
 			if((currentFunction == null)) {
 				File outputFolder;
-				List<String> choices = new ArrayList<>();
+				List<String> choices = Arrays.asList("only print", "only export", "print and export");//new ArrayList<>();
 				
 				analyzeAllFunctions();
-				choices.add("only print");
-				choices.add("only export");
-				choices.add("print and export");
+		
+//				choices.add("only print");
+//				choices.add("only export");
+//				choices.add("print and export");
 				String choice = askChoice("Choose", "What do you want this script to do?", choices, "only print");
 				switch(choice) {
 				case("only print"):
@@ -79,9 +82,9 @@ public class ObfuscationDetectionScript extends GhidraScript {
 					exportToCsvFile(outputFolder);
 					break;
 				case("print and export"):
-					dataSet.sortAndPrint();
 					outputFolder = askDirectory("Select a folder to save results", "Choose");
 					exportToCsvFile(outputFolder);
+					dataSet.sortAndPrint();
 					break;
 				}
 				return;
@@ -125,21 +128,21 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		}
 	}
 	
-	//parallel implementation. Currently seeing mixed gains.
+	//parallel implementation. Can't see any gains
 
-//	private void analyzeAllParallel() {
-//		FunctionIterator functionIterator =  currentProgram.getFunctionManager().getFunctionsNoStubs(true);
-//		StreamSupport.stream(functionIterator.spliterator(), true)
-//				.map(f -> {
-//					try {
-//						return analyzeFunction(f);
-//					} catch (CancelledException e) {
-//						e.printStackTrace();
-//					}
-//					return null;
-//				})
-//				.forEach(e->dataSet.add(e));
-//	}
+	private void analyzeAllParallel() {
+		FunctionIterator functionIterator =  currentProgram.getFunctionManager().getFunctionsNoStubs(true);
+		StreamSupport.stream(functionIterator.spliterator(), true)
+				.map(f -> {
+					try {
+						return analyzeFunction(f);
+					} catch (CancelledException e) {
+						e.printStackTrace();
+					}
+					return null;
+				})
+				.forEach(e->dataSet.add(e));
+	}
 
 	private void exportToCsvFile(File outputFolder) {
 		FileWriter fileWriter;
@@ -150,7 +153,7 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			String headers = String.join(", ", dataSet.get(0).getFieldNames());
 			fileWriter.write(headers + '\n');
 			
-			dataSet.sortByEntryPoint();
+//			dataSet.sortByEntryPoint();
 			for (FunctionData i : dataSet) {
 				String line = String.join(", ", i.getData());
 				fileWriter.write(line + '\n');
@@ -200,6 +203,26 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		public Address getEntryPoint() {
 			return entryPoint;
 		}
+		
+		public double getField(int field) {
+			double value = 0;
+			
+			switch(field) {
+			case 0:
+				value = getAverageInstructionsPerBlock();
+				break;
+			case 1: 
+				value = getCyclomaticComplexityScore();
+				break;
+			case 2:
+				value = getFlatteningScore();
+				break;
+			case 3:
+				value = getEntropy();
+				break;
+			}
+			return value;
+		}
 
 		public String[] getFieldNames() {
 			String[] fieldNames = { "Name", "Entry Point", "Average Instructions Per Block",
@@ -223,15 +246,18 @@ public class ObfuscationDetectionScript extends GhidraScript {
 		}
 		
 		public void printData() {
-			printf("Function: %s  Address: 0x%s  Average Instructions: %d  Complexity Score: %d  Flattening Score: %f  \n",
+			printf("Function: %s  Address: 0x%s  Average Instructions: %d  Complexity Score: %d  Flattening Score: %f  Entropy: %f \n",
 					name, entryPoint,averageInstructionsPerBlock ,cyclomaticComplexityScore, flatteningScore, entropy);
 
 		}
 	}
 	
 	private final class DataSet extends ArrayList<FunctionData> {
-		private final int numOfFeatures = 5;
-		
+		private final int numOfSortableFeatures = 4;
+		List<Double> thresholds = Arrays.asList(100.0, 50.0, 0.9, 7.0);
+		List<String> titles = Arrays.asList("Average Instructions per Basic Block",
+				"Cyclomatic Complexity Score", "Control Flow Flattening Score", "Entropy Score");
+
 		private void sortByAverageInstructions() {
 			sort(Comparator.comparingInt(FunctionData::getAverageInstructionsPerBlock).reversed());
 		}
@@ -248,8 +274,18 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			sort(Comparator.comparingDouble(FunctionData::getEntropy).reversed());
 		}
 		
-		private void sortByEntryPoint() {
-			sort(Comparator.comparing(FunctionData::getEntryPoint));
+//		private void sortByEntryPoint() {
+//			sort(Comparator.comparing(FunctionData::getEntryPoint));
+//		}
+		
+		private int countAboveThreshold(double threshold, int field) {
+			int index = 0;
+
+			while(get(index).getField(field) > threshold) {
+					index++;
+			} 
+
+			return index;
 		}
 		
 		private void sortBy(int sort) {
@@ -266,9 +302,9 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			case 3:
 				sortByEntropy();
 				break;
-			case 4:
-				sortByEntryPoint();
-				break;
+//			case 4:
+//				sortByEntryPoint();
+//				break;
 			}
 		}
 		
@@ -276,8 +312,12 @@ public class ObfuscationDetectionScript extends GhidraScript {
 			String line = String.join("", Collections.nCopies(100, "-")) + "\n";
 			print(line);
 
-			for(int i = 0; i < numOfFeatures - 1; i++) {
+			for(int i = 0; i <= numOfSortableFeatures - 1; i++) {
 				sortBy(i);
+				int count = countAboveThreshold(thresholds.get(i), i);
+				print(titles.get(i)+"\n");
+				printf("%d out of %d functions (%.2f %%) have score more than %.2f\n"
+						,count, size(), (double)count*100/size(), thresholds.get(i));
 				printTop10(i);
 				print(line);
 			}
@@ -343,32 +383,42 @@ public class ObfuscationDetectionScript extends GhidraScript {
 
 		private double calcFlatteningScore(Function function)
 				throws CancelledException {
-			GDirectedGraph<CodeBlockVertex, CodeBlockEdge> controlFlowGraph
-					= createControlFlowGraph(function);
-			GDirectedGraph<CodeBlockVertex, GEdge<CodeBlockVertex>> dominanceTree
-					= GraphAlgorithms.findDominanceTree(controlFlowGraph, monitor);
-			Collection<CodeBlockVertex> nodes = controlFlowGraph.getVertices();
-			Boolean hasBackEdge;
-			Double score = 0.0;
-			
-			for(CodeBlockVertex node: nodes) {
-				if(monitor.isCancelled()) {
-					break;
-				}
-				Collection<CodeBlockVertex> dominatedNodes = GraphAlgorithms.getDescendants(dominanceTree, Collections.singletonList(node));
-				
-				for(CodeBlockVertex dominatedNode: dominatedNodes) {
+			try {
+				GDirectedGraph<CodeBlockVertex, CodeBlockEdge> controlFlowGraph
+				= createControlFlowGraph(function);
+								
+				GDirectedGraph<CodeBlockVertex, GEdge<CodeBlockVertex>> dominanceTree
+				= GraphAlgorithms.findDominanceTree(controlFlowGraph, monitor);
+				Collection<CodeBlockVertex> nodes = controlFlowGraph.getVertices();
+				Boolean hasBackEdge;
+				Double score = 0.0;
+		
+				for(CodeBlockVertex node: nodes) {
 					if(monitor.isCancelled()) {
 						break;
 					}
-					hasBackEdge = controlFlowGraph.containsEdge(dominatedNode, node);
-					if(!hasBackEdge) {
-						continue;
+					Collection<CodeBlockVertex> dominatedNodes 
+					= GraphAlgorithms.getDescendants(dominanceTree, Collections.singletonList(node));
+			
+					for(CodeBlockVertex dominatedNode: dominatedNodes) {
+						if(monitor.isCancelled()) {
+							break;
+						}
+						hasBackEdge = controlFlowGraph.containsEdge(dominatedNode, node);
+						if(!hasBackEdge) {
+							continue;
+						}
+						score = Math.max(score, (double)dominatedNodes.size() / nodes.size());
 					}
-					score = Math.max(score, (double)dominatedNodes.size() / nodes.size());
 				}
+				return score;
+				
+			} catch (IllegalArgumentException e) {
+				printerr("Error occured when calculating graph at address " + function.getEntryPoint());
+			} catch(AssertException e) {
+				printerr("AssertException occured, there is a bug in the Ghidra API");
 			}
-			return score;
+			return 0;
 		}
 		
 		private GDirectedGraph<CodeBlockVertex, CodeBlockEdge> createControlFlowGraph(Function function)
